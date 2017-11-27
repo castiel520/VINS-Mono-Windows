@@ -20,6 +20,7 @@ queue<ImgConstPtr> img_msg_buf;
 std::mutex m_buf;
 std::condition_variable con;
 
+std::thread img_thread;
 int main(int, char**)
 {
 	for (int i = 0; i < NUM_OF_CAM; i++)
@@ -32,6 +33,7 @@ int main(int, char**)
 		}
 	}
 
+	img_thread = std::thread(&ProcessImage::processImage, ProcessImage());
 	return 0;
 }
 
