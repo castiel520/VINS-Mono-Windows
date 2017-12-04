@@ -23,6 +23,12 @@ std::condition_variable con;
 std::thread img_thread;
 std::thread imu_thread;
 
+//workaround
+void boost::throw_exception(std::exception const & e)
+{
+	cerr << e.what() << endl;
+}
+
 int main(int, char**)
 {
 	for (int i = 0; i < NUM_OF_CAM; i++)
