@@ -1,11 +1,11 @@
 ﻿#include <iostream>
 #include <stdio.h>
 #include <memory>
-#include <windows.h>
 #include <mutex>
-#include <opencv2\opencv.hpp>
 
+#include <windows.h>
 #include "vins_main.h"
+#include "estimator.h"
 
 using namespace cv;
 
@@ -13,7 +13,7 @@ VideoCapture caps[NUM_OF_CAM];
 
 // Store the IMU data for vins
 queue<ImuConstPtr> imu_msg_buf;
-// Store the fesature data processed by featuretracker
+// Store the feature data processed by featuretracker
 queue<ImgConstPtr> img_msg_buf;
 
 // Lock the feature and imu data buffer
@@ -21,6 +21,8 @@ std::mutex m_buf;
 std::condition_variable con;
 
 std::thread img_thread;
+std::thread imu_thread;
+
 int main(int, char**)
 {
 	for (int i = 0; i < NUM_OF_CAM; i++)
@@ -33,8 +35,19 @@ int main(int, char**)
 		}
 	}
 
-	img_thread = std::thread(&ProcessImage::processImage, ProcessImage());
+	img_thread = std::thread(&ProcessImage::process, ProcessImage());
+	imu_thread = std::thread(&ProcessIMU::process, ProcessIMU());
 	return 0;
+}
+
+void ProcessIMU::process()
+{
+	std::shared_ptr<IMU_MSG> imu_msg = std::make_shared<IMU_MSG>();
+	//send to img_msg_buf
+	m_buf.lock();
+	imu_msg_buf.push(imu_msg);
+	m_buf.unlock();
+	con.notify_one();
 }
 
 bool ProcessImage::grabAllCameras(VideoCapture* caps, cv::Mat* frames)
@@ -57,7 +70,7 @@ bool ProcessImage::grabAllCameras(VideoCapture* caps, cv::Mat* frames)
 	return true;
 }
 
-void ProcessImage::processImage()
+void ProcessImage::process()
 {
 	Mat frames[NUM_OF_CAM];
 
@@ -136,17 +149,15 @@ void ProcessImage::processImage()
 					{
 						idx.push_back(i);
 
-						//@baitao commented the undistortion code for now
-
-						//Eigen::Vector3d tmp_p;
-						//trackerData[0].m_camera->liftProjective(Eigen::Vector2d(trackerData[0].cur_pts[i].x, trackerData[0].cur_pts[i].y), tmp_p);
-						//tmp_p.x() = FOCAL_LENGTH * tmp_p.x() / tmp_p.z() + COL / 2.0;
-						//tmp_p.y() = FOCAL_LENGTH * tmp_p.y() / tmp_p.z() + ROW / 2.0;
+						Eigen::Vector3d tmp_p;
+						trackerData[0].m_camera->liftProjective(Eigen::Vector2d(trackerData[0].cur_pts[i].x, trackerData[0].cur_pts[i].y), tmp_p);
+						tmp_p.x() = FOCAL_LENGTH * tmp_p.x() / tmp_p.z() + COL / 2.0;
+						tmp_p.y() = FOCAL_LENGTH * tmp_p.y() / tmp_p.z() + ROW / 2.0;
 						ll.push_back(cv::Point2f(trackerData[0].cur_pts[i].x, trackerData[0].cur_pts[i].y));
 
-						//trackerData[1].m_camera->liftProjective(Eigen::Vector2d(trackerData[1].cur_pts[i].x, trackerData[1].cur_pts[i].y), tmp_p);
-						//tmp_p.x() = FOCAL_LENGTH * tmp_p.x() / tmp_p.z() + COL / 2.0;
-						//tmp_p.y() = FOCAL_LENGTH * tmp_p.y() / tmp_p.z() + ROW / 2.0;
+						trackerData[1].m_camera->liftProjective(Eigen::Vector2d(trackerData[1].cur_pts[i].x, trackerData[1].cur_pts[i].y), tmp_p);
+						tmp_p.x() = FOCAL_LENGTH * tmp_p.x() / tmp_p.z() + COL / 2.0;
+						tmp_p.y() = FOCAL_LENGTH * tmp_p.y() / tmp_p.z() + ROW / 2.0;
 						rr.push_back(cv::Point2f(trackerData[1].cur_pts[i].x, trackerData[1].cur_pts[i].y));
 					}
 				}
@@ -191,12 +202,13 @@ void ProcessImage::processImage()
 						{
 							int p_id = ids[j];
 							hash_ids[i].insert(p_id);
-							Eigen::Vector3d p;
-							p.x = (cur_pts[i].x - PX) / FOCUS_LENGTH_X;
+							Eigen::Vector3d p((cur_pts[i].x - PX) / FOCUS_LENGTH_X, (cur_pts[i].y - PY) / FOCUS_LENGTH_Y,1);
+							/*p.x = (cur_pts[i].x - PX) / FOCUS_LENGTH_X;
 							p.y = (cur_pts[i].y - PY) / FOCUS_LENGTH_Y;
-							p.z = 1;
+							p.z = 1;*/
 
-							img_msg->point_clouds[p_id * NUM_OF_CAM + i] = p;
+							img_msg->point_clouds.push_back(p);
+							img_msg->id_of_point.push_back(p_id * NUM_OF_CAM + i);
 						}
 					}
 					else if (STEREO_TRACK)
@@ -211,12 +223,13 @@ void ProcessImage::processImage()
 							{
 								int p_id = ids[j];
 								hash_ids[i].insert(p_id);
-								Eigen::Vector3d p;
-								p.x = (cur_pts[i].x - PX) / FOCUS_LENGTH_X;
-								p.y = (cur_pts[i].y - PY) / FOCUS_LENGTH_Y;
-								p.z = 1;
+								Eigen::Vector3d p((cur_pts[i].x - PX) / FOCUS_LENGTH_X, (cur_pts[i].y - PY) / FOCUS_LENGTH_Y, 1);
+								//p.x = (cur_pts[i].x - PX) / FOCUS_LENGTH_X;
+								//p.y = (cur_pts[i].y - PY) / FOCUS_LENGTH_Y;
+								//p.z = 1;
 
-								img_msg->point_clouds[p_id * NUM_OF_CAM + i] = p;
+								img_msg->point_clouds.push_back(p);
+								img_msg->id_of_point.push_back(p_id * NUM_OF_CAM + i);
 							}
 						}
 					}
@@ -272,3 +285,110 @@ void ProcessImage::processImage()
 	}
 
 }
+
+VIO::VIO()
+{
+	estimator = new Estimator();
+}
+
+std::vector<std::pair<std::vector<ImuConstPtr>, ImgConstPtr>> VIO::getMeasurements()
+{
+	std::vector<std::pair<std::vector<ImuConstPtr>, ImgConstPtr>> measurements;
+	while (true)
+	{
+		if (imu_msg_buf.empty() || img_msg_buf.empty())
+			return measurements;
+
+		if (!(imu_msg_buf.back()->header > img_msg_buf.front()->header))
+		{
+			cout << "wait for imu, only should happen at the beginning";
+				return measurements;
+		}
+
+		if (!(imu_msg_buf.front()->header < img_msg_buf.front()->header))
+		{
+			cout << "throw img, only should happen at the beginning";
+				img_msg_buf.pop();
+			continue;
+		}
+		ImgConstPtr img_msg = img_msg_buf.front();
+		img_msg_buf.pop();
+
+		std::vector<ImuConstPtr> IMUs;
+		while (imu_msg_buf.front()->header <= img_msg->header)
+		{
+			IMUs.emplace_back(imu_msg_buf.front());
+			imu_msg_buf.pop();
+		}
+		//NSLog(@"IMU_buf = %d",IMUs.size());
+		measurements.emplace_back(IMUs, img_msg);
+	}
+	return measurements;
+}
+
+void VIO::send_imu(const ImuConstPtr &imu_msg)
+{
+	double t = imu_msg->header;
+	if (current_time < 0)
+		current_time = t;
+	double dt = t - current_time;
+	current_time = t;
+
+	double ba[]{ 0.0, 0.0, 0.0 };
+	double bg[]{ 0.0, 0.0, 0.0 };
+
+	double dx = imu_msg->acc.x() - ba[0];
+	double dy = imu_msg->acc.y() - ba[1];
+	double dz = imu_msg->acc.z() - ba[2];
+
+	double rx = imu_msg->gyr.x() - bg[0];
+	double ry = imu_msg->gyr.y() - bg[1];
+	double rz = imu_msg->gyr.z() - bg[2];
+	//ROS_DEBUG("IMU %f, dt: %f, acc: %f %f %f, gyr: %f %f %f", t, dt, dx, dy, dz, rx, ry, rz);
+
+	estimator->processIMU(dt, Vector3d(dx, dy, dz), Vector3d(rx, ry, rz));
+}
+
+void VIO::processVIO()
+{
+	std::vector<std::pair<std::vector<ImuConstPtr>, ImgConstPtr>> measurements;
+	std::unique_lock<std::mutex> lk(m_buf);
+	con.wait(lk, [&]
+	{
+		return (measurements = getMeasurements()).size() != 0;
+	});
+	lk.unlock();
+
+	for (auto &measurement : measurements)
+	{
+		//分别取出各段imu数据，进行预积分
+		for (auto &imu_msg : measurement.first)
+			send_imu(imu_msg);
+
+		//对应这段的vision data
+		auto img_msg = measurement.second;
+		//ROS_DEBUG("processing vision data with stamp %f \n", img_msg->header.stamp.toSec());
+
+		TicToc t_s;
+		map<int, vector<pair<int, Vector3d>>> image;
+		for (unsigned int i = 0; i < img_msg->point_clouds.size(); i++)
+		{
+			int v = img_msg->id_of_point[i] + 0.5;
+			int feature_id = v / NUM_OF_CAM;
+			int camera_id = v % NUM_OF_CAM;
+			double x = img_msg->point_clouds[i].x();
+			double y = img_msg->point_clouds[i].y();
+			double z = img_msg->point_clouds[i].z();
+			assert(z == 1);
+			image[feature_id].emplace_back(camera_id, Vector3d(x, y, z));
+		}
+		estimator->processImage(image, img_msg->header);
+		/**
+		*** start build keyframe database for loop closure
+		**/
+
+		//ROS_ERROR("end: %f, at %f", img_msg->header.stamp.toSec(), ros::Time::now().toSec());
+	}
+}
+
+

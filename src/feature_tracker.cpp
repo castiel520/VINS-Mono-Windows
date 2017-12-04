@@ -107,12 +107,15 @@ void FeatureTracker::addPoints()
 void FeatureTracker::readImage(const cv::Mat &_img)
 {
     cv::Mat img;
- 
+    TicToc t_r;
+
     if (EQUALIZE)
     {
         //使用createCLAHE对图像进行自适应直方图均衡化
         cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(3.0, cv::Size(8, 8));
+        TicToc t_c;
         clahe->apply(_img, img);
+        //ROS_DEBUG("CLAHE costs: %fms", t_c.toc());
     }
     else
         img = _img;
@@ -130,6 +133,7 @@ void FeatureTracker::readImage(const cv::Mat &_img)
 
     if (cur_pts.size() > 0)
     {
+        TicToc t_o;
         vector<uchar> status;
         vector<float> err;
         //calcOpticalFlowPyrLK() LK金字塔光流法 
@@ -145,6 +149,7 @@ void FeatureTracker::readImage(const cv::Mat &_img)
         reduceVector(forw_pts, status);
         reduceVector(ids, status);
         reduceVector(track_cnt, status);
+        //ROS_DEBUG("temporal optical flow costs: %fms", t_o.toc());
     }
 
     if (PUB_THIS_FRAME)
@@ -155,9 +160,14 @@ void FeatureTracker::readImage(const cv::Mat &_img)
         for (auto &n : track_cnt)
             n++;
 
+        //ROS_DEBUG("set mask begins");
+        TicToc t_m;
         //为下面的goodFeaturesToTrack保证相邻的特征点之间要相隔30个像素,设置mask image
         setMask();
+        //ROS_DEBUG("set mask costs %fms", t_m.toc());
 
+        //ROS_DEBUG("detect feature begins");
+        TicToc t_t;
         int n_max_cnt = MAX_CNT - static_cast<int>(forw_pts.size());
         if (n_max_cnt > 0)
         {
@@ -172,9 +182,13 @@ void FeatureTracker::readImage(const cv::Mat &_img)
         }
         else
             n_pts.clear();
-        
+        //ROS_DEBUG("detect feature costs: %fms", t_t.toc());
+
+        //ROS_DEBUG("add feature begins");
+        TicToc t_a;
         addPoints();
-        
+        //ROS_DEBUG("selectFeature costs: %fms", t_a.toc());
+
         prev_img = forw_img;
         prev_pts = forw_pts;
     }
@@ -189,23 +203,22 @@ void FeatureTracker::rejectWithF()
 {
     if (forw_pts.size() >= 8)
     {
+        //ROS_DEBUG("FM ransac begins");
+        TicToc t_f;
         vector<cv::Point2f> un_prev_pts(prev_pts.size()), un_forw_pts(forw_pts.size());
+        for (unsigned int i = 0; i < prev_pts.size(); i++)
+        {
+            Eigen::Vector3d tmp_p;
+            m_camera->liftProjective(Eigen::Vector2d(prev_pts[i].x, prev_pts[i].y), tmp_p);
+            tmp_p.x() = FOCAL_LENGTH * tmp_p.x() / tmp_p.z() + COL / 2.0;
+            tmp_p.y() = FOCAL_LENGTH * tmp_p.y() / tmp_p.z() + ROW / 2.0;
+            un_prev_pts[i] = cv::Point2f(tmp_p.x(), tmp_p.y());
 
-				//@baitao commented this part of code for now, this part is to deal with the undistortion
-
-        //for (unsigned int i = 0; i < prev_pts.size(); i++)
-        //{
-        //    Eigen::Vector3d tmp_p;
-        //    m_camera->liftProjective(Eigen::Vector2d(prev_pts[i].x, prev_pts[i].y), tmp_p);
-        //    tmp_p.x() = FOCAL_LENGTH * tmp_p.x() / tmp_p.z() + COL / 2.0;
-        //    tmp_p.y() = FOCAL_LENGTH * tmp_p.y() / tmp_p.z() + ROW / 2.0;
-        //    un_prev_pts[i] = cv::Point2f(tmp_p.x(), tmp_p.y());
-
-        //    m_camera->liftProjective(Eigen::Vector2d(forw_pts[i].x, forw_pts[i].y), tmp_p);
-        //    tmp_p.x() = FOCAL_LENGTH * tmp_p.x() / tmp_p.z() + COL / 2.0;
-        //    tmp_p.y() = FOCAL_LENGTH * tmp_p.y() / tmp_p.z() + ROW / 2.0;
-        //    un_forw_pts[i] = cv::Point2f(tmp_p.x(), tmp_p.y());
-        //}
+            m_camera->liftProjective(Eigen::Vector2d(forw_pts[i].x, forw_pts[i].y), tmp_p);
+            tmp_p.x() = FOCAL_LENGTH * tmp_p.x() / tmp_p.z() + COL / 2.0;
+            tmp_p.y() = FOCAL_LENGTH * tmp_p.y() / tmp_p.z() + ROW / 2.0;
+            un_forw_pts[i] = cv::Point2f(tmp_p.x(), tmp_p.y());
+        }
 
         vector<uchar> status;
         cv::findFundamentalMat(un_prev_pts, un_forw_pts, cv::FM_RANSAC, F_THRESHOLD, 0.99, status);
@@ -215,6 +228,8 @@ void FeatureTracker::rejectWithF()
         reduceVector(forw_pts, status);
         reduceVector(ids, status);
         reduceVector(track_cnt, status);
+        //ROS_DEBUG("FM ransac: %d -> %lu: %f", size_a, forw_pts.size(), 1.0 * forw_pts.size() / size_a);
+        //ROS_DEBUG("FM ransac costs: %fms", t_f.toc());
     }
 }
 
@@ -235,14 +250,13 @@ bool FeatureTracker::updateID(unsigned int i)
 
 void FeatureTracker::readIntrinsicParameter(const string &calib_file)
 {
-    //m_camera = CameraFactory::instance()->generateCameraFromYamlFile(calib_file);
+    //ROS_INFO("reading paramerter of camera %s", calib_file.c_str());
+    m_camera = CameraFactory::instance()->generateCameraFromYamlFile(calib_file);
 }
-
 
 /**
  * @breif Visualize undistortedPoints Points
 */
-/*
 void FeatureTracker::showUndistortion(const string &name)
 {
     cv::Mat undistortedImg(ROW + 600, COL + 600, CV_8UC1, cv::Scalar(0));
@@ -278,12 +292,10 @@ void FeatureTracker::showUndistortion(const string &name)
     cv::imshow(name, undistortedImg);
     cv::waitKey(0);
 }
-*/
+
 /**
  * @breif undistortedPoints Points
 */
-
-/*
 vector<cv::Point2f> FeatureTracker::undistortedPoints()
 {
     vector<cv::Point2f> un_pts;
@@ -298,4 +310,3 @@ vector<cv::Point2f> FeatureTracker::undistortedPoints()
 
     return un_pts;
 }
-*/
