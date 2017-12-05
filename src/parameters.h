@@ -49,6 +49,9 @@ extern double ACC_N, ACC_W;
 extern double GYR_N, GYR_W;
 extern Eigen::Vector3d G;
 
+//@baitao
+extern bool READ_FROM_BAG;
+extern std::string IMG_RAW_PATH[NUM_OF_CAM];
 enum StateOrder
 {
 	O_P = 0,

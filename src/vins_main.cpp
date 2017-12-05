@@ -22,7 +22,11 @@ std::condition_variable con;
 
 std::thread img_thread;
 std::thread imu_thread;
+vector<cv::String> fn[NUM_OF_CAM];
+int index[NUM_OF_CAM];
+string img_path[NUM_OF_CAM];
 
+std::map<std::string, std::string> timestamps;
 //workaround
 void boost::throw_exception(std::exception const & e)
 {
@@ -31,18 +35,52 @@ void boost::throw_exception(std::exception const & e)
 
 int main(int, char**)
 {
-	for (int i = 0; i < NUM_OF_CAM; i++)
+	readParameters();
+
+	if (READ_FROM_BAG)
 	{
-		caps[i].open(0);
-		if (!caps[i].isOpened())
+		for (int i = 0; i < NUM_OF_CAM; i++)
 		{
-			std::cerr << "Unable to open camera\n";
-			return -1;
+			//read img names
+			img_path[i] = IMG_RAW_PATH[i] + "\\cam" + std::to_string(i) + "\\data\\";
+			cv::glob(img_path[i], fn[i], false);
+
+			if (i == 0)
+			{
+				//read timestamp
+				auto timestamp_path = IMG_RAW_PATH[i] + "\\cam" + std::to_string(i) + "\\data.csv";
+				std::ifstream  csv_file(timestamp_path);
+				std::string line;
+				while (std::getline(csv_file, line))
+				{
+					std::stringstream  lineStream(line);
+					std::string        cell0, cell1;
+					std::getline(lineStream, cell0, ',');
+					std::getline(lineStream, cell1, ',');
+					timestamps[cell1] = cell0;
+				}
+			}
+			
+
+			index[i] = 0;
 		}
 	}
-
+	else
+	{
+		for (int i = 0; i < NUM_OF_CAM; i++)
+		{
+			caps[i].open(0);
+			if (!caps[i].isOpened())
+			{
+				std::cerr << "Unable to open camera\n";
+				return -1;
+			}
+		}
+	}
+	
 	img_thread = std::thread(&ProcessImage::process, ProcessImage());
-	imu_thread = std::thread(&ProcessIMU::process, ProcessIMU());
+	//imu_thread = std::thread(&ProcessIMU::process, ProcessIMU());
+	img_thread.join();
 	return 0;
 }
 
@@ -58,27 +96,52 @@ void ProcessIMU::process()
 
 bool ProcessImage::grabAllCameras(VideoCapture* caps, cv::Mat* frames)
 {
-	for (int i = 0; i < NUM_OF_CAM; i++)
+	if (READ_FROM_BAG)
 	{
-		if (caps[i].grab())
+		for (int i = 0; i < NUM_OF_CAM; i++)
 		{
-			caps[i].retrieve(frames[i]);
-			if (frames[i].empty())
+			if (fn[i].size() >= index[i])
+			{
+				frames[i] = imread(fn[i][index[i]++],0);
+				if (frames[i].empty())
+				{
+					return false;
+				}
+			}
+			else
 			{
 				return false;
 			}
 		}
-		else
-		{
-			return false;
-		}
+		return true;
 	}
-	return true;
+	else
+	{
+		for (int i = 0; i < NUM_OF_CAM; i++)
+		{
+			if (caps[i].grab())
+			{
+				caps[i].retrieve(frames[i]);
+				if (frames[i].empty())
+				{
+					return false;
+				}
+			}
+			else
+			{
+				return false;
+			}
+		}
+		return true;
+	}	
 }
 
 void ProcessImage::process()
 {
 	Mat frames[NUM_OF_CAM];
+
+	for (int i = 0; i < NUM_OF_CAM; i++)
+		trackerData[i].readIntrinsicParameter(CAM_NAMES[i]);
 
 	//鱼眼相机的mask,追踪时候会用到
 	if (FISHEYE)
@@ -98,7 +161,25 @@ void ProcessImage::process()
 		if (grabAllCameras(caps, frames))
 		{
 			std::shared_ptr<IMG_MSG> img_msg = std::make_shared<IMG_MSG>();
-			img_msg->header = std::chrono::duration<double>(GetTickCount64()).count();
+			if (READ_FROM_BAG)
+			{
+				long long timestamp;
+				std::string img = std::string(fn[0][index[0] - 1]);
+				img = fn[0][index[0] - 1].substr(img_path[0].length());
+
+				if (!timestamps[img].empty())
+				{
+					auto timestamp_str = timestamps[img];
+					auto timestamp = std::stoll(timestamp_str); //nanoseconds
+					img_msg->header = timestamp * 1e-9;//seconds in double
+				}				
+				
+			}
+			else
+			{
+				img_msg->header = std::chrono::duration<double>(GetTickCount64()).count();
+			}
+			
 
 			if (m_b_first_image_flag)
 			{
@@ -202,16 +283,17 @@ void ProcessImage::process()
 				{
 					if (i != 1 || !STEREO_TRACK)
 					{
+						auto un_pts = trackerData[i].undistortedPoints();
 						auto &cur_pts = trackerData[i].cur_pts;
 						auto &ids = trackerData[i].ids;
 						for (unsigned int j = 0; j < ids.size(); j++)
 						{
 							int p_id = ids[j];
 							hash_ids[i].insert(p_id);
-							Eigen::Vector3d p((cur_pts[i].x - PX) / FOCUS_LENGTH_X, (cur_pts[i].y - PY) / FOCUS_LENGTH_Y,1);
-							/*p.x = (cur_pts[i].x - PX) / FOCUS_LENGTH_X;
-							p.y = (cur_pts[i].y - PY) / FOCUS_LENGTH_Y;
-							p.z = 1;*/
+							Eigen::Vector3d p;
+							p.x() = un_pts[j].x;
+							p.y() = un_pts[j].y;
+							p.z() = 1;
 
 							img_msg->point_clouds.push_back(p);
 							img_msg->id_of_point.push_back(p_id * NUM_OF_CAM + i);
@@ -248,23 +330,28 @@ void ProcessImage::process()
 
 				if (SHOW_TRACK)
 				{
-					Mat stereo_img(frames[0].rows * 2, frames[0].cols, CV_8UC3);
-					Mat up(stereo_img, Rect(0, 0, frames[0].cols, frames[0].rows));
-					Mat down(stereo_img, Rect(0, frames[0].rows, frames[0].cols, frames[0].rows));
-					frames[0].copyTo(up);
-					frames[1].copyTo(down);
-
+					Mat stereo_img;
+					cv::Mat single_img;
+					if (STEREO_TRACK && !frames[1].empty())
+					{
+						stereo_img = Mat(frames[0].rows * 2, frames[0].cols, CV_8UC3);
+						Mat up(stereo_img, Rect(0, 0, frames[0].cols, frames[0].rows));
+						Mat down(stereo_img, Rect(0, frames[0].rows, frames[0].cols, frames[0].rows));
+						frames[0].copyTo(up);
+						frames[1].copyTo(down);
+					}
+					
 					for (int i = 0; i < NUM_OF_CAM; i++)
 					{
-						cv::Mat tmp_img = frames[i];
-						cv::cvtColor(tmp_img, tmp_img, CV_GRAY2RGB);
+						single_img = frames[i];
+						cv::cvtColor(single_img, single_img, CV_GRAY2RGB);
 						if (i != 1 || !STEREO_TRACK)
 						{
 							//显示追踪状态，越红越好，越蓝越不行
 							for (unsigned int j = 0; j < trackerData[i].cur_pts.size(); j++)
 							{
 								double len = std::min(1.0, 1.0 * trackerData[i].track_cnt[j] / WINDOW_SIZE);
-								cv::circle(tmp_img, trackerData[i].cur_pts[j], 2, cv::Scalar(255 * (1 - len), 0, 255 * len), 2);
+								cv::circle(single_img, trackerData[i].cur_pts[j], 2, cv::Scalar(255 * (1 - len), 0, 255 * len), 2);
 								//char name[10];
 								//sprintf(name, "%d", trackerData[i].ids[j]);
 								//cv::putText(tmp_img, name, trackerData[i].cur_pts[j], cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0));
@@ -277,11 +364,23 @@ void ProcessImage::process()
 							{
 								if (r_status[j])
 								{
-									cv::circle(tmp_img, trackerData[i].cur_pts[j], 2, cv::Scalar(0, 255, 0), 2);
+									cv::circle(single_img, trackerData[i].cur_pts[j], 2, cv::Scalar(0, 255, 0), 2);
 									cv::line(stereo_img, trackerData[i - 1].cur_pts[j], trackerData[i].cur_pts[j] + cv::Point2f(0, ROW), cv::Scalar(0, 255, 0));
 								}
 							}
 						}
+					}
+					if (!STEREO_TRACK)
+					{
+						cv::namedWindow("vis");
+						cv::imshow("vis", single_img);
+						cv::waitKey(5);
+					}
+					else
+					{
+						cv::namedWindow("vis");
+						cv::imshow("vis", stereo_img);
+						cv::waitKey(0);
 					}
 				}
 

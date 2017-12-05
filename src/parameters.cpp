@@ -41,10 +41,14 @@ double GYR_N, GYR_W;
 
 Eigen::Vector3d G{ 0.0, 0.0, 9.8 };
 
+//@baitao
+bool READ_FROM_BAG;
+std::string IMG_RAW_PATH[NUM_OF_CAM];
+
 void readParameters()
 {
 	std::string config_file;
-	config_file = "../config/sample.yaml" ;
+	config_file = "../config/euroc/euroc_config.yaml";
 	cv::FileStorage fsSettings(config_file, cv::FileStorage::READ);
 	if (!fsSettings.isOpened())
 	{
@@ -65,7 +69,6 @@ void readParameters()
 		FISHEYE_MASK = "../config/fisheye_mask.jpg";
 	CAM_NAMES.push_back(config_file);
 
-	STEREO_TRACK = false;
 	FOCAL_LENGTH = 460;
 	PUB_THIS_FRAME = false;
 
@@ -127,4 +130,8 @@ void readParameters()
 	G.z() = fsSettings["g_norm"];
 
 	INIT_DEPTH = 5.0;
+
+	//@baitao hardcode for now
+	READ_FROM_BAG = true;
+	IMG_RAW_PATH[0] = "D:\\github\\mav0";
 }
